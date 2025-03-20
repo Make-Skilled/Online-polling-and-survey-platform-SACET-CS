@@ -1,0 +1,689 @@
+const User = require("../Models/UserSchema");
+const Poll = require("../Models/PollSchema");
+const Vote = require("../Models/VoteSchema");
+const Comment = require('../Models/CommentSchema');
+const FollowerFollowing = require('../Models/FollowerFollowing');
+const SavePoll = require("../Models/SavePollSchema");
+const mongoose = require('mongoose');
+const ObjectId = mongoose.Types.ObjectId;
+const validator = require("validator");
+const { sendErrorResponse } = require("../middlewares/erroHandle");
+const { sendEmail } = require("../middlewares/sendEmail");
+const crypto = require("crypto");
+const { uploadProfileImage, deleteProfileImage } = require('../helper/uploads');
+const { roundToDecimalPlaces } = require('../helper/functions');
+const getResetPasswordHTMLTemplate = require("../mails/resetPasswordTemplate");
+const { getEmailVerificationOtpHtml } = require("../mails/emailVerificationOtpTemplate");
+
+exports.registerUser = async (req, res) => {
+  try {
+    const { name, email, password, myStatus } = req.body;
+    const avatar = req.file;
+
+    if (!name) return sendErrorResponse(res, 400, "Name is required");
+    if (!email) return sendErrorResponse(res, 400, "Email is required");
+    if (!password) return sendErrorResponse(res, 400, "Password is required");
+    
+    // Check if user already exists
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return sendErrorResponse(res, 400, "Email already exists");
+    }
+    
+    let user = await User.create({
+      name,
+      email,
+      password,
+      myStatus,
+      isVerified: true  // Set this to true by default
+    });
+
+    if (avatar) {
+      const result = await uploadProfileImage(avatar, user._id);
+      user.avatar = {
+        public_id: result.public_id,
+        url: result.url
+      };
+      await user.save();
+    }
+
+    res.status(201).json({
+      success: true,
+      message: "Registration successful. Please login.",
+      user: {
+        name: user.name,
+        email: user.email,
+        avatar: user.avatar
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    sendErrorResponse(res, 500, "An error occurred during registration");
+  }
+};
+
+exports.verifyAccount = async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+    const user = await User.findOne({ email }).select('name email myStatus otp otpExpires isVerified avatar');
+    if (!user) return sendErrorResponse(res, 404, "User not found");
+    if (user.isVerified) return sendErrorResponse(res, 400, "Account already verified");
+    if (user.otpExpires < Date.now()) return sendErrorResponse(res, 400, "OTP has expired");
+    if (user.otp != otp) return sendErrorResponse(res, 400, "Invalid OTP");
+
+    user.isVerified = true;
+    user.otp = undefined;
+    user.otpExpires = undefined;
+    await user.save();
+
+    const token = user.generateToken();
+    const options = {
+      expires: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      httpOnly: true,
+    };
+    res.status(200).cookie("token", token, options).json({
+      success: true,
+      message: "Account verified successfully",
+      token,
+      user,
+    });
+  } catch (error) {
+    console.log(error)
+    sendErrorResponse(res, 500, "An error occurred while verifying the account");
+  }
+}
+
+exports.loginUser = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email) return sendErrorResponse(res, 400, "Email is required");
+    if (!validator.isEmail(email))
+      return sendErrorResponse(res, 400, "Invalid Email");
+    if (!password) return sendErrorResponse(res, 400, "Password is required");
+    
+    const user = await User.findOne({ email });
+    if (!user) return sendErrorResponse(res, 404, "Wrong Credentials");
+    
+    const isPasswordMatch = await user.matchPassword(password);
+    if (!isPasswordMatch)
+      return sendErrorResponse(res, 404, "Wrong Credentials");
+
+    const token = user.generateToken();
+    const options = {
+      expires: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      httpOnly: true,
+    };
+    
+    res.status(200).cookie("token", token, options).json({
+      success: true,
+      message: "Logged in Successfully",
+      token,
+      user,
+    });
+  } catch (error) {
+    console.error(error);
+    sendErrorResponse(res, 500, "An error occurred during login");
+  }
+};
+
+exports.resendVerificationOTP = async (req, res) => {
+  try {
+    const { email } = req.body;
+    const user = await User.findOne({ email });
+    if (!user) return sendErrorResponse(res, 401, 'Invalid email');
+    if (user.isVerified) return sendErrorResponse(res, 400, "Account already verified");
+    if (user.otp && user.otpExpires > Date.now()) {
+      const remainingTime = Math.floor((user.otpExpires - Date.now()) / (60 * 1000));
+      return sendErrorResponse(res, 400, `OTP has already been sent to ${user.email}. Try again in ${remainingTime} minutes.`);
+    }
+
+    const OTP = user.generateOTP();
+    await user.save();
+    try {
+      const validFor = process.env.OTP_VALID_TIME || 5;
+      await sendEmail({
+        email: user.email,
+        subject: "Verification OTP",
+        html: getEmailVerificationOtpHtml(OTP, user.name, validFor)
+      });
+    } catch (error) {
+      user.otp = undefined;
+      user.otpExpires = undefined;
+      await user.save();
+      return sendErrorResponse(res, 500, 'Failed to send verification email');
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `OTP resent to ${user.email}`,
+    });
+  } catch (error) {
+    console.log(error);
+    sendErrorResponse(res, 500, 'Failed to resend verification OTP');
+  }
+};
+
+exports.resendVerificationOtpTimeLeft = async (req, res) => {
+  try {
+    const { email } = req.body;
+    const user = await User.findOne({ email });
+    if (!user) return sendErrorResponse(res, 400, "No account with this email");
+    if (user.isVerified) return sendErrorResponse(res, 400, "This email already has verified");
+    const expiryTime = new Date(user.otpExpires);
+    const now = new Date();
+    const waitFor = Math.floor((expiryTime.getTime() - now.getTime()) / 1000);
+    return res.status(200).json({ success: true, waitFor });
+  } catch (error) {
+    console.log(error)
+    sendErrorResponse(res,)
+  }
+}
+
+exports.logoutUser = async (req, res) => {
+  try {
+    res
+      .status(200)
+      .cookie("token", null, { expires: new Date(Date.now()) })
+      .json({
+        success: true,
+        message: "Logged Out successfully",
+      });
+  } catch (error) {
+    sendErrorResponse(res, 500, error.message);
+  }
+};
+
+exports.myProfile = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) return sendErrorResponse(res, 404, "User not found");
+    res.status(200).json({
+      success: true,
+      user,
+    });
+  } catch (error) {
+    sendErrorResponse(res, 500, error.message)
+  }
+}
+
+exports.getUserDetails = async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return sendErrorResponse(res, 404, "User not found");
+    res.status(200).json({
+      success: true,
+      user,
+    });
+  } catch (error) {
+    sendErrorResponse(res, 500, error.message);
+  }
+};
+
+exports.getAllUsers = async (req, res) => {
+  try {
+    const itemsPerPage = parseInt(req.query.itemsPerPage) || 10;
+    const page = parseInt(req.query.page) || 1;
+    const search = req.query.search || '';
+    const role = req.query.role;
+
+    let query = {
+      $or: [
+        { name: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } },
+      ]
+    };
+
+    if (role && role !== 'all') {
+      query.role = role;
+    }
+
+    const totalItems = await User.countDocuments(query);
+
+    const users = await User.find(query)
+      .skip((page - 1) * itemsPerPage)
+      .limit(itemsPerPage)
+      .select('-password');
+
+    res.status(200).json({
+      success: true,
+      totalItems,
+      users,
+    });
+  } catch (error) {
+    sendErrorResponse(res, 500, error.message);
+  }
+};
+
+exports.forgotPassword = async (req, res) => {
+  try {
+    const user = await User.findOne({ email: req.body.email });
+    if (!user) return sendErrorResponse(res, 404, "User not found");
+
+    if (user.resetPasswordToken && user.resetPasswordExpire > Date.now()) {
+      return sendErrorResponse(res, 400, "A password reset link has already been sent. Please check your email or wait before requesting another.");
+    }
+
+    const resetPasswordToken = await user.generateResetPasswordToken();
+
+    const resetPasswordUrl = `${process.env.FRONTEND_URL}/reset-password/${resetPasswordToken}`;
+
+    const message = `Click the below link to reset your password \n\n ${resetPasswordUrl} \n\n`;
+    try {
+      await sendEmail({
+        email: user.email,
+        subject: "Reset Password Recovery",
+        message,
+        html: getResetPasswordHTMLTemplate(user.name, resetPasswordUrl)
+      });
+      await user.save();
+      res.status(200).json({
+        success: true,
+        message: `Email Sent to ${user.email}`,
+      });
+    } catch (error) {
+      user.resetPasswordToken = undefined;
+      user.resetPasswordExpire = undefined;
+      await user.save();
+      sendErrorResponse(res, 500, error.message);
+    }
+  } catch (error) {
+    sendErrorResponse(res, 500, error.message);
+  }
+};
+
+exports.verifyResetToken = async (req, res) => {
+  try {
+    const resetPasswordToken = crypto
+      .createHash("sha256")
+      .update(req.params.token)
+      .digest("hex");
+
+    const user = await User.findOne({
+      resetPasswordToken,
+      resetPasswordExpire: { $gt: Date.now() }
+    });
+
+    if (!user) {
+      return sendErrorResponse(res, 400, "Password reset token is invalid or has expired");
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Token is valid",
+    });
+  } catch (error) {
+    sendErrorResponse(res, 500, error.message);
+  }
+};
+
+exports.resetPassword = async (req, res) => {
+  try {
+    const resetPasswordToken = crypto
+      .createHash("sha256")
+      .update(req.params.token)
+      .digest("hex");
+    const resetToken = await User.findOne({ resetPasswordToken });
+    if (!resetToken) {
+      return sendErrorResponse(res, 404, "Token not found");
+    }
+
+    if (resetToken.resetPasswordExpire < Date.now()) {
+      return sendErrorResponse(res, 400, "Token has expired");
+    }
+
+    const { newPassword, confirmPassword } = req.body;
+
+    if (!newPassword) {
+      return sendErrorResponse(res, 400, "New password is required");
+    }
+
+    if (!confirmPassword) {
+      return sendErrorResponse(res, 400, "Confirm password is required");
+    }
+
+    if (newPassword !== confirmPassword) {
+      return sendErrorResponse(res, 400, "Passwords do not match");
+    }
+
+    const user = await User.findById(resetToken._id);
+
+    if (!user) {
+      return sendErrorResponse(res, 404, "User not found");
+    }
+
+    user.password = req.body.newPassword;
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpire = undefined;
+
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Password reset successfully",
+    });
+  } catch (error) {
+    sendErrorResponse(res, 500, error.message);
+  }
+};
+
+exports.updatePassword = async (req, res) => {
+  try {
+    const { newPassword, confirmPassword, oldPassword } = req.body;
+    const user = await User.findById(req.user._id);
+    const isPasswordMatch = await user.matchPassword(oldPassword);
+    if (!isPasswordMatch)
+      return sendErrorResponse(
+        res,
+        401,
+        "Password doesnot match with oldPassword"
+      );
+    if (newPassword !== confirmPassword)
+      return sendErrorResponse(
+        res,
+        401,
+        "newPassword and oldPassword doesnot match"
+      );
+    user.password = newPassword;
+    await user.save();
+    res.status(200).json({
+      success: true,
+      message: "Password updated successfully",
+    });
+  } catch (error) {
+    sendErrorResponse(res, 500, error.message);
+  }
+};
+
+exports.updateProfile = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { name, email, myStatus } = req.body;
+    const avatar = req.file;
+
+    const user = await User.findById(userId);
+
+    if (name) user.name = name;
+    if (email) user.email = email;
+    if (myStatus) user.myStatus = myStatus;
+
+    if (avatar) {
+      // Delete old image if exists
+      if (user.avatar.public_id) {
+        await deleteProfileImage(user.avatar.public_id);
+      }
+
+      const result = await uploadProfileImage(avatar, user._id);
+      user.avatar = {
+        public_id: result.public_id,
+        url: result.url
+      };
+    }
+
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Profile Updated Successfully",
+      user
+    });
+  } catch (error) {
+    sendErrorResponse(res, 500, error.message);
+  }
+};
+
+exports.updateRole = async (req, res) => {
+  try {
+    const changeRoleTo = req.query.changeRoleTo;
+    const userId = req.params.id;
+    const reqUserId = req.user._id;
+    if (reqUserId.toString() == userId.toString()) return sendErrorResponse(res, 404, 'You cannot change your role');
+    if (reqUserId.toString() != '65465220b4b8929cb532e583') return sendErrorResponse(res, 404, 'You are not allowed to change role of this user')
+    const updatedUser = await User.findByIdAndUpdate(
+      userId,
+      { role: changeRoleTo },
+      { new: true }
+    );
+    if (!updatedUser) return sendErrorResponse(res, 404, "User not found");
+    await updatedUser.save();
+    res.status(200).json({
+      success: true,
+      message: `${updatedUser.name} is now ${changeRoleTo}`,
+    });
+  } catch (error) {
+    sendErrorResponse(res, 500, error.message);
+  }
+};
+
+exports.deleteProfile = async (req, res) => {
+  // const session = await mongoose.startSession();
+  // session.startTransaction();
+  const deletedDocs = {};
+  try {
+    const userId = req.params.id;
+    const user = await User.findById(userId);
+    // const user = await User.findById(userId).session(session); and session for all other transactions too
+    const reqUser = req.user
+    if (!user)
+      return sendErrorResponse(res, 404, "User not found");
+    if ((reqUser.role !== 'admin' && reqUser._id.toString() !== userId.toString()))
+      return sendErrorResponse(res, 404, "You are not allowed to delete this user");
+    if (userId.toString() == '65465220b4b8929cb532e583')
+      return sendErrorResponse(res, 404, 'This account cannot be deleted');
+
+    deletedDocs.user = await User.deleteOne({ _id: userId });
+    deletedDocs.poll = await Poll.deleteMany({ author: userId });
+    deletedDocs.votes = await Vote.deleteMany({ User: userId });
+    deletedDocs.comments = await Comment.deleteMany({ commentedBy: userId });
+    deletedDocs.followerFollowing = await FollowerFollowing.deleteMany({ $or: [{ followerId: userId }, { followingId: userId }] });
+    deletedDocs.savedPoll = await SavePoll.deleteMany({ userId: userId });
+    // await session.commitTransaction();
+    // session.endSession();
+    if (reqUser._id.toString() === userId.toString()) {
+      return res.status(200)
+        .cookie("token", null, { expires: new Date(Date.now()) })
+        .json({
+          success: true,
+          message: "Your account has been deleted"
+        });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Profile Deleted successfully",
+    });
+  } catch (error) {
+    // await session.abortTransaction();
+    // session.endSession();
+    if (deletedDocs.user) {
+      await User.insertMany(deletedDocs.user);
+    }
+    if (deletedDocs.poll) {
+      await Poll.insertMany(deletedDocs.poll);
+    }
+    if (deletedDocs.votes) {
+      await Vote.insertMany(deletedDocs.votes);
+    }
+    if (deletedDocs.comments) {
+      await SavePoll.insertMany(deletedDocs.comments);
+    }
+    if (deletedDocs.followerFollowing) {
+      await Vote.insertMany(deletedDocs.followerFollowing);
+    }
+    if (deletedDocs.savedPoll) {
+      await SavePoll.insertMany(deletedDocs.savedPoll);
+    }
+    sendErrorResponse(res, 500, error.message);
+  }
+};
+
+//  Controller for the user dashboard 
+exports.getDashboard = async (req, res) => {
+  try {
+    const userId = req.params.id;
+    // Get total active polls for the user
+    const activePolls = await Poll.countDocuments({
+      author: userId,
+      startDate: { $lte: new Date() },
+      endDate: { $gte: new Date() },
+    });
+
+    // Get total polls created by the user
+    const totalPollsCreated = await Poll.countDocuments({ author: userId });
+
+    // Get total votes given to active polls
+    const activePollVotes = await Vote.countDocuments({
+      User: userId,
+      Poll: {
+        $in: await Poll.find({
+          startDate: { $lte: new Date() },
+          endDate: { $gte: new Date() }
+        }).distinct('_id')
+      },
+    });
+
+    // Get total votes given by the user in his lifetime
+    const lifetimeVotes = await Vote.countDocuments({ User: userId });
+
+    // Generate an array of dates for the last 7 days
+    const dateRange = Array.from({ length: 7 }, (_, index) => {
+      const date = new Date();
+      date.setDate(date.getDate() - index);
+      return date.toISOString().split('T')[0];
+    });
+
+    // Get poll data for chart (active and closed polls in the last 7 days)
+    const pollChartData = await Poll.aggregate([
+      {
+        $match: {
+          author: new ObjectId(userId),
+          endDate: { $gte: new Date(new Date() - 7 * 24 * 60 * 60 * 1000) }, // Last 7 days
+        },
+      },
+      {
+        $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    // Fill in missing dates with zero counts for pollChartData
+    const filledPollChartData = dateRange.map((date) => ({
+      label: new Date(date).toLocaleDateString('en-GB'),
+      count: pollChartData.find((entry) => entry._id === date)?.count || 0,
+    }));
+
+    // Get poll data for the previous 7 days
+    const previousPollChartData = await Poll.aggregate([
+      {
+        $match: {
+          author: new ObjectId(userId),
+          endDate: {
+            $gte: new Date(new Date() - 14 * 24 * 60 * 60 * 1000), // Previous 7 days
+            $lt: new Date(new Date() - 7 * 24 * 60 * 60 * 1000), // Last 14 days to Last 7 days
+          },
+        },
+      },
+      {
+        $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const totalPollInThisWeak = filledPollChartData.reduce((acc, current) => acc + current.count, 0);
+    const totalPollInLastWeak = previousPollChartData.reduce((acc, current) => acc + current.count, 0);
+
+    // Calculating polls growth percentage
+    let pollGrowthPercentage;
+    if (totalPollInLastWeak === 0) {
+      pollGrowthPercentage = 100;
+    } else {
+      pollGrowthPercentage = roundToDecimalPlaces(((Math.abs(totalPollInThisWeak - totalPollInLastWeak) / totalPollInLastWeak) * 100), 2); // Growth percentage with respect to previous seven days
+    }
+
+    // Compare poll counts for the last 7 days and the previous 7 days
+    const pollComparison = {
+      totalNumber: totalPollsCreated,
+      growth: totalPollInThisWeak > totalPollInLastWeak,
+      growthPercentage: pollGrowthPercentage,
+      thisWeek: totalPollInThisWeak,
+      lastWeek: totalPollInLastWeak,
+    };
+
+    // Get vote data for chart (active and closed votes in the last 7 days)
+    const voteChartData = await Vote.aggregate([
+      {
+        $match: {
+          User: new ObjectId(userId),
+          createdAt: { $gte: new Date(new Date() - 7 * 24 * 60 * 60 * 1000) }, // Last 7 days
+        },
+      },
+      {
+        $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    // Fill in missing dates with zero counts for voteChartData
+    const filledVoteChartData = dateRange.map((date) => ({
+      label: date,
+      count: voteChartData.find((entry) => entry._id === date)?.count || 0,
+    }));
+
+    // Get vote data for the previous 7 days
+    const previousVoteChartData = await Vote.aggregate([
+      {
+        $match: {
+          User: new ObjectId(userId),
+          createdAt: {
+            $gte: new Date(new Date() - 14 * 24 * 60 * 60 * 1000), // Previous 7 days
+            $lt: new Date(new Date() - 7 * 24 * 60 * 60 * 1000), // Last 14 days to Last 7 days
+          },
+        },
+      },
+      {
+        $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$endDate' } },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const totalVoteInThisWeak = filledVoteChartData.reduce((acc, current) => acc + current.count, 0);
+    const totalVoteInLastWeak = previousVoteChartData.reduce((acc, current) => acc + current.count, 0);
+
+    // Calculating votes growth percentage
+    let voteGrowthPercentage;
+    if (totalVoteInLastWeak === 0) {
+      voteGrowthPercentage = 100
+    } else {
+      voteGrowthPercentage = roundToDecimalPlaces(((Math.abs(totalVoteInThisWeak - totalVoteInLastWeak) / totalVoteInLastWeak) * 100), 2); // Growth percentage with respect to previous seven days
+    }
+
+    // Compare vote counts for the last 7 days and the previous 7 days
+    const voteComparison = {
+      totalNumber: lifetimeVotes,
+      growth: totalVoteInThisWeak > totalVoteInLastWeak,
+      growthPercentage: voteGrowthPercentage,
+      thisWeek: totalVoteInThisWeak,
+      lastWeek: totalVoteInLastWeak,
+    };
+
+    // Send the dashboard information as a response
+    res.json({
+      activePolls,
+      totalPollsCreated: pollComparison,
+      activePollVotes,
+      lifetimeVotes: voteComparison,
+      pollChartData: filledPollChartData,
+      voteChartData: filledVoteChartData,
+    });
+  } catch (error) {
+    console.error(error);
+    sendErrorResponse(res, 500, error.message);
+  }
+}

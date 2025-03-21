@@ -1,7 +1,11 @@
 import { Routes, Route } from 'react-router-dom';
-import { Layout, Home, NoPage, Login, Signup, VerifyEmail, ForgotPassword, ResetPassword, PollLayout, Poll, Dashoard, CreatePoll, EditPoll, MyPolls, MyVotes, SavedPoll, MyFeeds, AllPolls, AllUsers, MyProfile, Profile, IsAuthenticatedUser } from './modules'
+import { Layout, Home, NoPage, Login, Signup, VerifyEmail, ForgotPassword, ResetPassword, 
+  PollLayout, Poll, Dashoard, CreatePoll, EditPoll, MyPolls, MyVotes, SavedPoll, MyFeeds, 
+  AllPolls, AllUsers, MyProfile, Profile, IsAuthenticatedUser, CreateSurvey, MySurveys, 
+  SurveyDetail } from './modules'
 import { useUserInfo } from './contexts/UserContext';
 import './App.css'
+import ErrorBoundary from './components/ErrorBoundary';
 
 function App() {
   const { userInfo } = useUserInfo();
@@ -36,6 +40,16 @@ function App() {
             <Route path="saved-polls" element={<SavedPoll />} />
             <Route path="my_profile" element={<MyProfile />} />
             <Route path="profile/:id" element={<Profile />} />
+            <Route 
+              path="create-survey" 
+              element={
+                <ErrorBoundary>
+                  <CreateSurvey />
+                </ErrorBoundary>
+              } 
+            />
+            <Route path="my-surveys" element={<MySurveys />} />
+            <Route path="survey/:id" element={<SurveyDetail />} />
           </Route>
           <Route path="*" element={<NoPage />} />
         </Route>
@@ -45,3 +59,5 @@ function App() {
 }
 
 export default App
+
+

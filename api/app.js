@@ -29,6 +29,7 @@ const vote = require("./Router/voteRoutes");
 const comment = require("./Router/commentRoutes");
 const followerFollowing = require("./Router/followerFollowingRoutes");
 const savePoll = require("./Router/savePollRoutes");
+const survey = require("./Router/surveyRoutes");
 
 app.use("/api/v1/user", user);
 app.use("/api/v1/poll", poll);
@@ -36,6 +37,7 @@ app.use("/api/v1/vote", vote);
 app.use("/api/v1/comment", comment);
 app.use("/api/v1/followers_followings", followerFollowing);
 app.use("/api/v1/save-poll", savePoll);
+app.use("/api/v1/survey", survey);
 
 // Base route
 app.get('/', (req, res) => {

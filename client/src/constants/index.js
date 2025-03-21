@@ -83,17 +83,23 @@ const getSideLinks = (userRole) => {
             text: 'Saved Polls',
             linkTo: "/poll/saved-polls",
         },
+        {
+            id: 7,
+            icon_name: 'clipboard',
+            text: 'Surveys',
+            linkTo: "/poll/my-surveys",
+        },
     ];
 
     if (userRole === 'admin') {
         sideLinks.unshift({
-            id: 7,
+            id: 8,
             icon_name: 'home',
             text: 'All Polls',
             linkTo: `/poll`,
         });
         sideLinks.splice(2, 0, {
-            id: 8,
+            id: 9,
             icon_name: 'people',
             text: 'All Users',
             linkTo: `/poll/all-users`,

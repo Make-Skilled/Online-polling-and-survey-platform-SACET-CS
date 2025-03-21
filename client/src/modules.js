@@ -35,5 +35,8 @@ const AllUsers = lazy(() => import('./pages/AllUsers/index.jsx'));
 const MyProfile = lazy(() => import('./pages/MyProfile'));
 const IsAuthenticatedUser = lazy(() => import('./components/IsAuthenticatedUser'));
 const Profile = lazy(() => import('./pages/Profile'));
+const CreateSurvey = lazy(() => import('./pages/Survey/CreateSurvey'));
+const MySurveys = lazy(() => import('./pages/Survey/MySurveys'));
+const SurveyDetail = lazy(() => import('./pages/Survey/SurveyDetail'));
 
-export { NoPage, Layout, Home, Login, Signup, VerifyEmail, ForgotPassword, ResetPassword, PollLayout, Poll, Dashoard, CreatePoll, EditPoll, MyPolls, MyVotes, SavedPoll, MyFeeds, AllPolls, AllUsers, MyProfile, Profile, UserContextProvider, IsAuthenticatedUser }
+export { NoPage, Layout, Home, Login, Signup, VerifyEmail, ForgotPassword, ResetPassword, PollLayout, Poll, Dashoard, CreatePoll, EditPoll, MyPolls, MyVotes, SavedPoll, MyFeeds, AllPolls, AllUsers, MyProfile, Profile, UserContextProvider, IsAuthenticatedUser, CreateSurvey, MySurveys, SurveyDetail }
